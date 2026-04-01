@@ -1641,6 +1641,11 @@ class HYMotionModularExportFBX:
     CATEGORY = "HY-Motion/modular"
     OUTPUT_NODE = True
 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Force re-execution so export can be retried after failures.
+        return float("nan")
+
     def export_fbx(self, motion_data: HYMotionData, template_name: str, fps: float, output_dir: str, filename_prefix: str, 
                    batch_index: int = 0, scale: float = 100.0, in_place: bool = False, in_place_x: bool = False, in_place_y: bool = False, in_place_z: bool = False,
                    absolute_root: bool = True):
@@ -1677,7 +1682,35 @@ class HYMotionModularExportFBX:
         full_output_dir = os.path.join(COMFY_OUTPUT_DIR, output_dir)
         os.makedirs(full_output_dir, exist_ok=True)
 
-        output_dict = motion_data.output_dict
+        output_dict = motion_data.output_dict if hasattr(motion_data, "output_dict") else {}
+        if not isinstance(output_dict, dict):
+            output_dict = {}
+
+        has_rot6d = ("rot6d" in output_dict and output_dict["rot6d"] is not None)
+        has_transl = ("transl" in output_dict and output_dict["transl"] is not None)
+        has_poses = ("poses" in output_dict and output_dict["poses"] is not None)
+        has_trans = ("trans" in output_dict and output_dict["trans"] is not None)
+
+        can_export_from_rot6d = has_rot6d and has_transl
+        can_export_from_poses = has_poses and (has_transl or has_trans)
+
+        if not (can_export_from_rot6d or can_export_from_poses):
+            available = ", ".join(sorted(output_dict.keys())) if output_dict else "none"
+            msg = (
+                "FBX export failed: motion_data missing required data. "
+                f"Available keys: {available}. "
+                "Need either (rot6d + transl) or (poses + transl/trans)."
+            )
+            print(f"[HY-Motion] {msg}")
+            return {"ui": {"error": [msg], "timestamp": [time.time()]}, "result": ("",)}
+        
+        available_keys = ", ".join(sorted(output_dict.keys())) if output_dict else "none"
+        print(
+            f"[HY-Motion] Export input ready | keys={available_keys} | "
+            f"mode={'rot6d+transl' if can_export_from_rot6d else 'poses+trans'} | "
+            f"batch_size={motion_data.batch_size}"
+        )
+
         timestamp = get_timestamp()
         unique_id = str(uuid.uuid4())[:8]
 
@@ -1685,30 +1718,73 @@ class HYMotionModularExportFBX:
 
         for batch_idx in range(motion_data.batch_size):
             try:
-                rot6d = output_dict["rot6d"][batch_idx].clone()
-                transl = output_dict["transl"][batch_idx].clone()
-                
-                # Apply in-place: lock axes based on toggles
-                # HyMotion/SMPL-H space: Y is usually UP, Z is FORWARD, X is SIDE
+                def _pick_batch(data_obj):
+                    if data_obj is None:
+                        return None
+                    if isinstance(data_obj, torch.Tensor):
+                        if data_obj.dim() >= 1 and data_obj.shape[0] == motion_data.batch_size:
+                            return data_obj[batch_idx].clone()
+                        return data_obj.clone()
+                    arr = np.asarray(data_obj)
+                    if arr.ndim >= 1 and arr.shape[0] == motion_data.batch_size:
+                        return arr[batch_idx]
+                    return arr
+
                 lock_x = in_place_x or in_place
                 lock_z = in_place_z or in_place
                 lock_y = in_place_y
-                
-                if lock_x or lock_y or lock_z:
-                    # Get the initial position at frame 0
-                    init_pos = transl[0].clone()
-                    if lock_x: transl[:, 0] = init_pos[0]
-                    if lock_y: transl[:, 1] = init_pos[1]
-                    if lock_z: transl[:, 2] = init_pos[2]
-                    
-                    locked_axes = []
-                    if lock_x: locked_axes.append("X")
-                    if lock_y: locked_axes.append("Y")
-                    if lock_z: locked_axes.append("Z")
-                    print(f"[HY-Motion] In-place applied (Modular): Locked axes {', '.join(locked_axes)}")
-                
-                # Prepare SMPL-H dictionary for converter
-                smpl_data = construct_smpl_data_dict(rot6d, transl)
+
+                if can_export_from_rot6d:
+                    rot6d = _pick_batch(output_dict["rot6d"])
+                    transl = _pick_batch(output_dict["transl"])
+                    print(
+                        f"[HY-Motion] Export batch {batch_idx}: mode=rot6d | "
+                        f"rot6d_shape={tuple(rot6d.shape)} | transl_shape={tuple(transl.shape)}"
+                    )
+
+                    if lock_x or lock_y or lock_z:
+                        init_pos = transl[0].clone()
+                        if lock_x: transl[:, 0] = init_pos[0]
+                        if lock_y: transl[:, 1] = init_pos[1]
+                        if lock_z: transl[:, 2] = init_pos[2]
+
+                        locked_axes = []
+                        if lock_x: locked_axes.append("X")
+                        if lock_y: locked_axes.append("Y")
+                        if lock_z: locked_axes.append("Z")
+                        print(f"[HY-Motion] In-place applied (Modular): Locked axes {', '.join(locked_axes)}")
+
+                    smpl_data = construct_smpl_data_dict(rot6d, transl)
+                else:
+                    poses = _pick_batch(output_dict["poses"])
+                    transl_like = _pick_batch(output_dict["transl"] if has_transl else output_dict["trans"])
+                    print(
+                        f"[HY-Motion] Export batch {batch_idx}: mode=poses | "
+                        f"poses_shape={tuple(poses.shape)} | trans_shape={tuple(transl_like.shape)} | "
+                        f"trans_source={'transl' if has_transl else 'trans'}"
+                    )
+
+                    if isinstance(poses, torch.Tensor):
+                        poses_np = poses.cpu().numpy()
+                    else:
+                        poses_np = np.asarray(poses)
+                    if isinstance(transl_like, torch.Tensor):
+                        trans_np = transl_like.cpu().numpy()
+                    else:
+                        trans_np = np.asarray(transl_like)
+
+                    if lock_x or lock_y or lock_z:
+                        init_pos = trans_np[0].copy()
+                        if lock_x: trans_np[:, 0] = init_pos[0]
+                        if lock_y: trans_np[:, 1] = init_pos[1]
+                        if lock_z: trans_np[:, 2] = init_pos[2]
+                        locked_axes = []
+                        if lock_x: locked_axes.append("X")
+                        if lock_y: locked_axes.append("Y")
+                        if lock_z: locked_axes.append("Z")
+                        print(f"[HY-Motion] In-place applied (Poses): Locked axes {', '.join(locked_axes)}")
+
+                    smpl_data = {"poses": poses_np, "trans": trans_np}
                 
                 fbx_filename = f"{filename_prefix}_{timestamp}_{unique_id}_{batch_idx:03d}.fbx"
                 fbx_path = os.path.join(full_output_dir, fbx_filename)
@@ -1991,23 +2067,60 @@ class HYMotionLoadNPZ:
         print(f"[HY-Motion] Loading NPZ: {full_path}")
         data = np.load(full_path, allow_pickle=True)
         
+        # Compute shared slice range once.
+        frame_len = None
+        for probe_key in ["rot6d", "poses", "transl", "trans", "body_pose", "global_orient", "keypoints3d"]:
+            if probe_key in data:
+                frame_len = data[probe_key].shape[0]
+                break
+        if frame_len is None:
+            frame_len = 0
+
+        actual_end = end_frame_idx if end_frame_idx != -1 else frame_len
+        actual_start = max(0, min(start_frame_idx, frame_len))
+        actual_end = max(actual_start, min(actual_end, frame_len))
+
         # Reconstruct output_dict
         output_dict = {}
         # Map keys back to tensors
-        for key in ["keypoints3d", "rot6d", "transl", "root_rotations_mat"]:
+        for key in ["keypoints3d", "rot6d", "transl", "root_rotations_mat", "poses", "trans"]:
             if key in data:
                 tensor = torch.from_numpy(data[key])
-                
-                # Slicing logic
-                total_frames = tensor.shape[0]
-                
-                # Handle end_frame_idx = -1
-                actual_end = end_frame_idx if end_frame_idx != -1 else total_frames
-                actual_start = max(0, min(start_frame_idx, total_frames))
-                actual_end = max(actual_start, min(actual_end, total_frames))
-                
                 sliced_tensor = tensor[actual_start:actual_end]
                 output_dict[key] = sliced_tensor.unsqueeze(0) # Add batch dim
+
+        # Compatibility alias: some NPZs only provide "trans", while
+        # downstream nodes often look for "transl".
+        if "transl" not in output_dict and "trans" in output_dict:
+            output_dict["transl"] = output_dict["trans"]
+
+        # GVHMR-style compatibility: synthesize full SMPL-H poses from
+        # global_orient + body_pose when NPZ does not provide poses/rot6d.
+        if "poses" not in output_dict and "global_orient" in data and "body_pose" in data:
+            go_np = np.asarray(data["global_orient"])[actual_start:actual_end]
+            bp_np = np.asarray(data["body_pose"])[actual_start:actual_end]
+
+            if go_np.ndim == 2 and go_np.shape[-1] == 3:
+                go_flat = go_np
+            else:
+                go_flat = go_np.reshape(go_np.shape[0], -1)[:, :3]
+
+            if bp_np.ndim >= 3 and bp_np.shape[-1] == 3:
+                bp_flat = bp_np.reshape(bp_np.shape[0], -1)
+            else:
+                bp_flat = bp_np.reshape(bp_np.shape[0], -1)
+
+            # Expect 52 joints x 3 axis-angle = 156 dims.
+            poses_flat = np.zeros((go_flat.shape[0], 156), dtype=np.float32)
+            merged = np.concatenate([go_flat, bp_flat], axis=1).astype(np.float32)
+            fill_len = min(poses_flat.shape[1], merged.shape[1])
+            poses_flat[:, :fill_len] = merged[:, :fill_len]
+            output_dict["poses"] = torch.from_numpy(poses_flat).unsqueeze(0)
+            print(f"[HY-Motion] NPZ compatibility: synthesized poses from global_orient/body_pose, shape={poses_flat.shape}")
+
+        # Also expose trans for converters that expect this key.
+        if "trans" not in output_dict and "transl" in output_dict:
+            output_dict["trans"] = output_dict["transl"]
         
         # Extract metadata
         text = str(data.get("text", "loaded motion"))
