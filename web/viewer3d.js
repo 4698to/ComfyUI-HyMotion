@@ -1,3 +1,23 @@
+// Polyfill: ensure WebGL context has cancelAnimationFrame for Three.js dispose()
+(function () {
+    try {
+        const origGetContext = HTMLCanvasElement.prototype.getContext;
+        if (origGetContext && !HTMLCanvasElement.prototype.__joe_cancelAnimationFrame_patched) {
+            HTMLCanvasElement.prototype.getContext = function (...args) {
+                const ctx = origGetContext.apply(this, args);
+                if (ctx && !ctx.cancelAnimationFrame && typeof window.cancelAnimationFrame === "function") {
+                    ctx.cancelAnimationFrame = window.cancelAnimationFrame.bind(window);
+                }
+                return ctx;
+            };
+            HTMLCanvasElement.prototype.__joe_cancelAnimationFrame_patched = true;
+            console.log("[HY-Motion] Patched canvas.getContext to provide context.cancelAnimationFrame");
+        }
+    } catch (e) {
+        console.warn("[HY-Motion] Failed to patch cancelAnimationFrame polyfill:", e);
+    }
+})();
+
 // Three.js Local Paths
 const THREE_URL = "./lib/three/three.module.js";
 const FBX_LOADER_URL = "./lib/three/examples/jsm/loaders/FBXLoader.js";
