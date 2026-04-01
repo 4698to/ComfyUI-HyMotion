@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Joe Upload NPZ</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 10px;
+            background: #1a1a1a;
+            color: #f0f0f0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+            font-size: 13px;
+        }
+        #container {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        #row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        input[type="file"] {
+            flex: 1;
+        }
+        button {
+            cursor: pointer;
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: 1px solid #555;
+            background: #2b2b2b;
+            color: #fff;
+            font-size: 13px;
+        }
+        button[disabled] {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        #path {
+            padding: 8px;
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.4);
+            word-break: break-all;
+        }
+        #status {
+            font-size: 12px;
+            opacity: 0.85;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="row">
+            <input id="file-input" type="file" accept=".npz" />
+            <button id="upload-btn" type="button">上传 NPZ</button>
+        </div>
+        <div id="path">当前路径：未上传</div>
+        <div id="status">等待选择本地 npz 文件...</div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById("file-input");
+        const uploadBtn = document.getElementById("upload-btn");
+        const pathEl = document.getElementById("path");
+        const statusEl = document.getElementById("status");
+
+        function setStatus(text) {
+            statusEl.textContent = text;
+        }
+
+        function setPath(path) {
+            pathEl.textContent = `当前路径：${path || "未上传"}`;
+        }
+
+        async function uploadNPZ() {
+            const file = fileInput.files && fileInput.files[0];
+            if (!file) {
+                setStatus("请先选择一个 .npz 文件");
+                return;
+            }
+            if (!file.name.toLowerCase().endsWith(".npz")) {
+                setStatus("仅支持 .npz 文件");
+                return;
+            }
+
+            uploadBtn.disabled = true;
+            setStatus("上传中...");
+
+            try {
+                const form = new FormData();
+                form.append("file", file, file.name);
+
+                const resp = await fetch("/hymotion/upload_npz", {
+                    method: "POST",
+                    body: form,
+                });
+                const data = await resp.json();
+
+                if (!resp.ok || !data?.ok) {
+                    throw new Error(data?.error || `HTTP ${resp.status}`);
+                }
+
+                const npzPath = data.npz_path || "";
+                setPath(npzPath);
+                setStatus("上传成功，已写入节点参数");
+
+                window.parent.postMessage(
+                    {
+                        type: "joe_npz_uploaded",
+                        npzPath,
+                    },
+                    "*"
+                );
+            } catch (e) {
+                setStatus(`上传失败: ${e.message || e}`);
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        }
+
+        function onMessage(event) {
+            const data = event.data || {};
+            if (data.type === "joe_npz_current_path") {
+                setPath(data.npzPath || "");
+            }
+        }
+
+        uploadBtn.addEventListener("click", uploadNPZ);
+        window.addEventListener("message", onMessage);
+    </script>
+</body>
+</html>
+
