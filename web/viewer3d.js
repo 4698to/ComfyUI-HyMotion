@@ -40,35 +40,43 @@ console.log("[HY-Motion] app imported successfully:", !!app);
 // Track active viewer instances to manage WebGL context lifecycle
 const activeViewerNodes = new Set();
 
+// Debounce: export nodes trigger refresh; full-disk scans must not stack (SMB/huge output trees).
+let _refreshHyMotionAssetsTimer = null;
+const REFRESH_HYMOTION_ASSETS_MS = 500;
+
 // Global asset refresh function for all HY-Motion nodes
-const refreshAllHyMotionAssets = async () => {
-    try {
-        console.log("[HY-Motion] Refreshing asset lists for all relevant nodes...");
-        const response = await api.fetchApi("/hymotion/get_assets");
-        if (!response.ok) return;
-        const assets = await response.json();
+const refreshAllHyMotionAssets = () => {
+    if (_refreshHyMotionAssetsTimer) clearTimeout(_refreshHyMotionAssetsTimer);
+    _refreshHyMotionAssetsTimer = setTimeout(async () => {
+        _refreshHyMotionAssetsTimer = null;
+        try {
+            console.log("[HY-Motion] Refreshing asset lists for all relevant nodes...");
+            const response = await api.fetchApi("/hymotion/get_assets");
+            if (!response.ok) return;
+            const assets = await response.json();
 
-        if (!app.graph || !app.graph._nodes) return;
+            if (!app.graph || !app.graph._nodes) return;
 
-        app.graph._nodes.forEach(node => {
-            const nodeName = node.type;
-            if (nodeName === "HYMotionFBXPlayer" || nodeName === "HYMotion3DModelLoader") {
-                const widgetName = nodeName === "HYMotion3DModelLoader" ? "model_path" : "fbx_name";
-                const widget = node.widgets?.find(w => w.name === widgetName);
+            app.graph._nodes.forEach(node => {
+                const nodeName = node.type;
+                if (nodeName === "HYMotionFBXPlayer" || nodeName === "HYMotion3DModelLoader") {
+                    const widgetName = nodeName === "HYMotion3DModelLoader" ? "model_path" : "fbx_name";
+                    const widget = node.widgets?.find(w => w.name === widgetName);
 
-                if (widget && assets) {
-                    const newList = nodeName === "HYMotion3DModelLoader" ?
-                        assets.fbx_files :
-                        assets.fbx_files.filter(f => f.startsWith("output/")).map(f => f.substring(7));
+                    if (widget && assets) {
+                        const newList = nodeName === "HYMotion3DModelLoader" ?
+                            assets.fbx_files :
+                            assets.fbx_files.filter(f => f.startsWith("output/")).map(f => f.substring(7));
 
-                    widget.options.values = newList;
+                        widget.options.values = newList;
+                    }
                 }
-            }
-        });
-        if (app.graph) app.graph.setDirtyCanvas(true);
-    } catch (e) {
-        console.error("[HY-Motion] Failed to refresh global assets:", e);
-    }
+            });
+            if (app.graph) app.graph.setDirtyCanvas(true);
+        } catch (e) {
+            console.error("[HY-Motion] Failed to refresh global assets:", e);
+        }
+    }, REFRESH_HYMOTION_ASSETS_MS);
 };
 
 

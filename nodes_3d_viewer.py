@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import torch
@@ -218,40 +219,52 @@ async def download_registered_file(request):
         traceback.print_exc()
         return web.json_response({"error": str(e)}, status=500)
 
+def _collect_hymotion_assets_sync():
+    """
+    Blocking disk scan for 3D assets. Must not run on the asyncio event loop
+    (large input/output trees or slow network paths can freeze the whole UI).
+    """
+    input_dir = folder_paths.get_input_directory()
+    output_dir = folder_paths.get_output_directory()
+
+    fbx_files = []
+    templates = []
+    extensions = [".fbx", ".glb", ".gltf", ".obj"]
+
+    def scan_dir(base_path, prefix="", target_list=None):
+        if not os.path.exists(base_path):
+            return
+        if target_list is None:
+            target_list = fbx_files
+        for root, _, filenames in os.walk(base_path):
+            for f in filenames:
+                if any(f.lower().endswith(ext) for ext in extensions):
+                    rel = os.path.relpath(os.path.join(root, f), base_path).replace("\\", "/")
+                    target_list.append(f"{prefix}{rel}")
+
+    scan_dir(input_dir, "input/")
+    scan_dir(output_dir, "output/")
+
+    from .__init__ import CURRENT_DIR
+
+    template_dir = os.path.join(CURRENT_DIR, "assets", "wooden_models")
+    scan_dir(template_dir, "", templates)
+
+    return {
+        "fbx_files": sorted(fbx_files) if fbx_files else ["none"],
+        "templates": sorted(templates) if templates else ["none"],
+    }
+
+
 @PromptServer.instance.routes.get("/hymotion/get_assets")
 async def get_assets(request):
     """
     Returns a lists of available FBX files (input/output) and templates.
     """
     try:
-        input_dir = folder_paths.get_input_directory()
-        output_dir = folder_paths.get_output_directory()
-        
-        fbx_files = []
-        templates = []
-        extensions = [".fbx", ".glb", ".gltf", ".obj"]
-        
-        def scan_dir(base_path, prefix="", target_list=None):
-            if not os.path.exists(base_path): return
-            if target_list is None: target_list = fbx_files
-            for root, _, filenames in os.walk(base_path):
-                for f in filenames:
-                    if any(f.lower().endswith(ext) for ext in extensions):
-                        rel = os.path.relpath(os.path.join(root, f), base_path).replace("\\", "/")
-                        target_list.append(f"{prefix}{rel}")
-
-        scan_dir(input_dir, "input/")
-        scan_dir(output_dir, "output/")
-        
-        # Also scan templates
-        from .__init__ import CURRENT_DIR
-        template_dir = os.path.join(CURRENT_DIR, "assets", "wooden_models")
-        scan_dir(template_dir, "", templates)
-
-        return web.json_response({
-            "fbx_files": sorted(fbx_files) if fbx_files else ["none"],
-            "templates": sorted(templates) if templates else ["none"]
-        })
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, _collect_hymotion_assets_sync)
+        return web.json_response(data)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 

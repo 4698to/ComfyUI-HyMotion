@@ -1666,13 +1666,13 @@ class HYMotionModularExportFBX:
         except ImportError:
             msg = "Error: FBX SDK not installed. Please install it to use FBX export."
             print(f"[HY-Motion] {msg}")
-            return (msg,)
+            return {"ui": {"error": [msg], "timestamp": [time.time()]}, "result": (msg, None)}
         except Exception as e:
             import traceback
             msg = f"Error initializing FBX converter: {str(e)}"
             print(f"[HY-Motion] {msg}")
             traceback.print_exc()
-            return (msg,)
+            return {"ui": {"error": [msg], "timestamp": [time.time()]}, "result": (msg, None)}
 
         # Log DiT device if it wasn't logged during loading (due to caching)
         if hasattr(motion_data, "device_info"):
@@ -1702,7 +1702,7 @@ class HYMotionModularExportFBX:
                 "Need either (rot6d + transl) or (poses + transl/trans)."
             )
             print(f"[HY-Motion] {msg}")
-            return {"ui": {"error": [msg], "timestamp": [time.time()]}, "result": ("",)}
+            return {"ui": {"error": [msg], "timestamp": [time.time()]}, "result": ("", None)}
         
         available_keys = ", ".join(sorted(output_dict.keys())) if output_dict else "none"
         print(
@@ -1809,7 +1809,7 @@ class HYMotionModularExportFBX:
         relative_paths = [os.path.relpath(p, COMFY_OUTPUT_DIR).replace("\\", "/") for p in fbx_files]
         
         if not relative_paths:
-            return {"ui": {"error": ["FBX export failed. Check console for details."], "timestamp": [time.time()]}, "result": ("",)}
+            return {"ui": {"error": ["FBX export failed. Check console for details."], "timestamp": [time.time()]}, "result": ("", None)}
             
         result = "\n".join(relative_paths)
         
